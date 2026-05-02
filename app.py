@@ -17,7 +17,7 @@ Set GEMINI_API_KEY in .env for real Gemini summaries.
 import streamlit as st
 
 # ─── Runtime switches ─────────────────────────────────────────────────────────
-USE_MOCK     = False   # True → mock_feeds (offline) | False → live RSS
+USE_MOCK     = False  # True → mock_feeds (offline) | False → live RSS
 FORCE_HYBRID = True   # True → local classifier     | False → BART download
 MAX_ARTICLES = 30
 CACHE_TTL    = 1800   # seconds (30 min)
@@ -54,12 +54,13 @@ st.markdown("""
     border-radius: 20px;
     font-weight: 500;
 }
-.summary-line {
+.summary-para {
     border-left: 3px solid #4e8cff;
     padding-left: 10px;
-    margin: 3px 0;
-    font-size: 0.88rem;
-    line-height: 1.55;
+    margin: 6px 0;
+    font-size: 0.9rem;
+    line-height: 1.65;
+    color: inherit;
 }
 .score-bar-wrap { display:flex; align-items:center; gap:8px; margin:3px 0; }
 .score-bar-bg   { flex:1; background:#ffffff15; border-radius:4px; height:6px; }
@@ -106,25 +107,27 @@ def load_articles() -> list[dict]:
 
 def fetch_summary_for(article: dict) -> None:
     """
-    Call Gemini for one article and store the result in session_state.
-    Falls back to sentence-split description if Gemini fails or is unconfigured.
-    Called synchronously inside a st.spinner context.
+    Fetch full article body + call Gemini for one article.
+    Stores result in session_state keyed by article URL.
     """
-    url = article.get("url", article["title"])  # use URL as stable key
+    url = article.get("url", article["title"])
 
     from summariser import summarise_article, get_gemini_client
     client = _get_gemini_client()
 
-    # Work on a shallow copy so we don't mutate the cached article list
+    # Pass the real URL so summarise_article can fetch the full body
     scratch = {
         "title":       article.get("title", ""),
         "description": article.get("description", ""),
+        "url":         article.get("url", ""),
+        "source":      article.get("source", ""),
     }
     summarise_article(scratch, client=client)
 
     st.session_state.summaries[url] = {
-        "text":   scratch.get("summary", ""),
-        "source": scratch.get("summary_source", "fallback"),
+        "text":        scratch.get("summary", ""),
+        "source":      scratch.get("summary_source", "fallback"),
+        "body_source": scratch.get("body_source", "rss_description"),
     }
 
 
@@ -186,27 +189,38 @@ def render_article(article: dict, idx: int):
 
         # ── Row 2: summary area OR summarise button ───────────────────────
         if cached_summary:
-            # Show the summary with a source label
-            src_label = "★ Gemini" if cached_summary["source"] == "gemini" else "○ Fallback"
-            lines = [l.strip() for l in cached_summary["text"].splitlines() if l.strip()][:3]
-            st.markdown(
-                "".join(f'<div class="summary-line">{l}</div>' for l in lines),
-                unsafe_allow_html=True,
-            )
-            st.caption(src_label)
+            # Show the summary — split on double newline for paragraph rendering
+            src_label  = "★ Gemini" if cached_summary["source"] == "gemini" else "○ Fallback"
+            body_label = cached_summary.get("body_source", "")
+            body_note  = {
+                "full_article":  "📄 Full article text",
+                "rss_description": "📰 RSS description only",
+            }.get(body_label, "")
+
+            paragraphs = [p.strip() for p in cached_summary["text"].split("\n\n") if p.strip()]
+            for para in paragraphs:
+                st.markdown(
+                    f'<div class="summary-para">{para}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            col_src, col_body = st.columns([1, 2])
+            col_src.caption(src_label)
+            if body_note:
+                col_body.caption(body_note)
 
         elif is_summarising:
-            st.info("Fetching summary…", icon="⏳")
+            st.info("Fetching full article + calling Gemini…", icon="⏳")
 
         else:
             # The button — unique key uses index to avoid duplicate-widget errors
             if st.button(
                 "✨ Summarise",
                 key=f"sum_btn_{idx}",
-                help="Generate a 3-line Gemini summary for this article",
+                help="Fetch the full article text and generate a Gemini summary",
             ):
                 st.session_state.summarising.add(url)
-                with st.spinner("Calling Gemini…"):
+                with st.spinner("Fetching article + calling Gemini…"):
                     fetch_summary_for(article)
                 st.session_state.summarising.discard(url)
                 st.rerun()
