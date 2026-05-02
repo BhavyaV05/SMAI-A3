@@ -1,32 +1,36 @@
 """
-app.py — T9.3 Tech News Tracker (Phase 1 + 2 + 3)
-===================================================
+app.py — T9.3 Tech News Tracker (Phase 1 + 2 + on-demand Phase 3)
+==================================================================
+Articles load immediately (Phase 1 RSS + Phase 2 classification).
+Phase 3 summarisation is on-demand: click "Summarise" next to any
+article to fetch just that one summary from Gemini.
+
+Summary state is stored in st.session_state so it survives tab
+switches and doesn't reset on every Streamlit rerun.
+
 Run:
     streamlit run app.py
 
 Set GEMINI_API_KEY in .env for real Gemini summaries.
-Flip USE_MOCK and FORCE_HYBRID below for offline development.
 """
 
 import streamlit as st
 
-# ─── Runtime switches ────────────────────────────────────────────────────────
-USE_MOCK        = True    # True  → mock_feeds (offline)  |  False → live RSS
-FORCE_HYBRID    = False    # True  → local classifier      |  False → BART download
-MAX_ARTICLES    = 30
-CACHE_TTL       = 1800    # seconds (30 min)
+# ─── Runtime switches ─────────────────────────────────────────────────────────
+USE_MOCK     = False   # True → mock_feeds (offline) | False → live RSS
+FORCE_HYBRID = True   # True → local classifier     | False → BART download
+MAX_ARTICLES = 30
+CACHE_TTL    = 1800   # seconds (30 min)
 
 CATEGORIES = ["Technology", "Business", "Politics", "Sports", "Entertainment"]
 
-CONFIDENCE_THRESHOLDS = {"high": 0.70, "medium": 0.50}
-
 SOURCE_COLORS = {
-    "TechCrunch": ("#e06c3a", "#e06c3a22"),
-    "The Verge":  ("#7c5cbf", "#7c5cbf22"),
-    "YourStory":  ("#1a7f5a", "#1a7f5a22"),
+    "TechCrunch": ("#e06c3a", "#e06c3a18"),
+    "The Verge":  ("#7c5cbf", "#7c5cbf18"),
+    "YourStory":  ("#1a7f5a", "#1a7f5a18"),
 }
 
-# ─── Page config ─────────────────────────────────────────────────────────────
+# ─── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="T9.3 Tech News Tracker",
     page_icon="📡",
@@ -55,126 +59,170 @@ st.markdown("""
     padding-left: 10px;
     margin: 3px 0;
     font-size: 0.88rem;
+    line-height: 1.55;
 }
-.score-bar-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 3px 0;
-}
-.score-bar-bg {
-    flex: 1;
-    background: #ffffff15;
-    border-radius: 4px;
-    height: 7px;
-}
-.score-bar-fill {
-    height: 7px;
-    border-radius: 4px;
-}
+.score-bar-wrap { display:flex; align-items:center; gap:8px; margin:3px 0; }
+.score-bar-bg   { flex:1; background:#ffffff15; border-radius:4px; height:6px; }
+.score-bar-fill { height:6px; border-radius:4px; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ─── Cached resources ────────────────────────────────────────────────────────
+# ─── Session state initialisation ─────────────────────────────────────────────
+# summaries: dict[article_url -> {"text": str, "source": "gemini"|"fallback"}]
+# summarising: set of article_urls currently being fetched (spinner state)
+if "summaries" not in st.session_state:
+    st.session_state.summaries = {}
+if "summarising" not in st.session_state:
+    st.session_state.summarising = set()
 
-@st.cache_resource
-def _get_classifier():
-    from classifier import get_classifier
-    return get_classifier(force_hybrid=FORCE_HYBRID)
+
+# ─── Cached resources ─────────────────────────────────────────────────────────
 
 @st.cache_resource
 def _get_gemini_client():
     from summariser import get_gemini_client
     return get_gemini_client()
 
+
 @st.cache_data(ttl=CACHE_TTL)
 def load_articles() -> list[dict]:
-    """Phase 1 → 2 → 3. Re-runs at most once per CACHE_TTL seconds."""
-    from pipeline_runner import run_pipeline
-    return run_pipeline(
-        use_mock=USE_MOCK,
-        force_hybrid_classifier=FORCE_HYBRID,
-        max_articles=MAX_ARTICLES,
-        inter_call_sleep=4.0,
-    )
+    """
+    Phase 1 (RSS) + Phase 2 (classify) only.
+    Phase 3 is on-demand per article.
+    """
+    if USE_MOCK:
+        from mock_feeds import fetch_articles
+    else:
+        from rss_parser import fetch_articles
+
+    from classifier import classify_articles
+    articles = fetch_articles(max_articles=MAX_ARTICLES)
+    articles = classify_articles(articles, force_hybrid=FORCE_HYBRID)
+    return articles
+
+
+# ─── On-demand summarisation ──────────────────────────────────────────────────
+
+def fetch_summary_for(article: dict) -> None:
+    """
+    Call Gemini for one article and store the result in session_state.
+    Falls back to sentence-split description if Gemini fails or is unconfigured.
+    Called synchronously inside a st.spinner context.
+    """
+    url = article.get("url", article["title"])  # use URL as stable key
+
+    from summariser import summarise_article, get_gemini_client
+    client = _get_gemini_client()
+
+    # Work on a shallow copy so we don't mutate the cached article list
+    scratch = {
+        "title":       article.get("title", ""),
+        "description": article.get("description", ""),
+    }
+    summarise_article(scratch, client=client)
+
+    st.session_state.summaries[url] = {
+        "text":   scratch.get("summary", ""),
+        "source": scratch.get("summary_source", "fallback"),
+    }
 
 
 # ─── Render helpers ───────────────────────────────────────────────────────────
 
-def _conf_color(conf: float) -> tuple[str, str]:
-    """(emoji, hex) for confidence float."""
-    if conf >= CONFIDENCE_THRESHOLDS["high"]:
-        return "🟢", "#2d6a4f"
-    elif conf >= CONFIDENCE_THRESHOLDS["medium"]:
-        return "🟡", "#856404"
+def _conf_color(conf: float):
+    if conf >= 0.70: return "🟢", "#2d6a4f"
+    if conf >= 0.50: return "🟡", "#856404"
     return "🔴", "#842029"
 
 
 def _source_badge(source: str) -> str:
-    fg, bg = SOURCE_COLORS.get(source, ("#888", "#88888822"))
+    fg, bg = SOURCE_COLORS.get(source, ("#888", "#88888818"))
     return (
         f'<span class="source-badge" style="background:{bg};color:{fg};'
         f'border:1px solid {fg}55;">{source}</span>'
     )
 
 
-def render_article(article: dict):
+def render_article(article: dict, idx: int):
     title      = article.get("title", "Untitled")
-    url        = article.get("url", "#")
+    url        = article.get("url", title)        # stable session_state key
+    link       = article.get("url", "#")
     source     = article.get("source", "")
     published  = article.get("published")
     category   = article.get("category", "Unknown")
     confidence = article.get("confidence", 0.0)
     all_scores = article.get("all_scores", {})
-    summary    = article.get("summary", "")
-    sum_src    = article.get("summary_source", "fallback")
 
     conf_emoji, conf_color = _conf_color(confidence)
     date_str = published.strftime("%d %b %Y · %H:%M UTC") if published else ""
 
+    # Has this article already been summarised?
+    cached_summary = st.session_state.summaries.get(url)
+    is_summarising = url in st.session_state.summarising
+
     with st.container(border=True):
-        # Title + meta row
-        c_title, c_badge = st.columns([5, 1])
+
+        # ── Row 1: title + confidence pill ───────────────────────────────
+        c_title, c_conf = st.columns([5, 1])
         with c_title:
-            st.markdown(f"**[{title}]({url})**")
+            st.markdown(f"**[{title}]({link})**")
             st.markdown(
                 _source_badge(source)
-                + f'<span style="font-size:11px;color:var(--text-color,#888);">{date_str}</span>',
+                + f'<span style="font-size:11px;color:var(--text-color,#888);">'
+                  f'{date_str}</span>',
                 unsafe_allow_html=True,
             )
-        with c_badge:
+        with c_conf:
             st.markdown(
-                f'<div style="text-align:right;padding-top:4px;">'
+                f'<div style="text-align:right;padding-top:6px;">'
                 f'<span class="conf-pill" '
                 f'style="background:{conf_color}22;color:{conf_color};">'
-                f'{conf_emoji} {confidence:.0%}</span><br>'
-                f'<span style="font-size:10px;color:#888;display:block;margin-top:3px;">'
-                f'{"★ Gemini" if sum_src == "gemini" else "○ Fallback"}</span>'
+                f'{conf_emoji} {confidence:.0%}</span>'
+                f'<br><span style="font-size:10px;color:#888;">{category}</span>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
 
-        # 3-line summary
-        if summary:
-            lines = [l.strip() for l in summary.splitlines() if l.strip()][:3]
+        # ── Row 2: summary area OR summarise button ───────────────────────
+        if cached_summary:
+            # Show the summary with a source label
+            src_label = "★ Gemini" if cached_summary["source"] == "gemini" else "○ Fallback"
+            lines = [l.strip() for l in cached_summary["text"].splitlines() if l.strip()][:3]
             st.markdown(
                 "".join(f'<div class="summary-line">{l}</div>' for l in lines),
                 unsafe_allow_html=True,
             )
+            st.caption(src_label)
 
-        # Score breakdown
+        elif is_summarising:
+            st.info("Fetching summary…", icon="⏳")
+
+        else:
+            # The button — unique key uses index to avoid duplicate-widget errors
+            if st.button(
+                "✨ Summarise",
+                key=f"sum_btn_{idx}",
+                help="Generate a 3-line Gemini summary for this article",
+            ):
+                st.session_state.summarising.add(url)
+                with st.spinner("Calling Gemini…"):
+                    fetch_summary_for(article)
+                st.session_state.summarising.discard(url)
+                st.rerun()
+
+        # ── Row 3: score breakdown (collapsible) ──────────────────────────
         if all_scores:
-            with st.expander("Category confidence breakdown", expanded=False):
+            with st.expander("Category scores", expanded=False):
                 for label, score in sorted(all_scores.items(), key=lambda x: -x[1]):
-                    pct = int(score * 100)
-                    fill_color = "#4e8cff" if label == category else "#666666"
-                    bold = "600" if label == category else "400"
+                    pct  = int(score * 100)
+                    fill = "#4e8cff" if label == category else "#666666"
+                    bold = "600"     if label == category else "400"
                     st.markdown(
                         f'<div class="score-bar-wrap">'
                         f'<span style="width:105px;font-size:12px;font-weight:{bold};">{label}</span>'
                         f'<div class="score-bar-bg">'
-                        f'<div class="score-bar-fill" style="width:{pct}%;background:{fill_color};"></div>'
+                        f'<div class="score-bar-fill" style="width:{pct}%;background:{fill};"></div>'
                         f'</div>'
                         f'<span style="font-size:12px;width:32px;text-align:right;">{score:.0%}</span>'
                         f'</div>',
@@ -182,60 +230,67 @@ def render_article(article: dict):
                     )
 
 
-# ─── Sidebar ─────────────────────────────────────────────────────────────────
+# ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.title("📡 T9.3 News Tracker")
-    st.caption("All phases active")
 
     st.markdown("---")
     st.subheader("Pipeline")
-
-    phases = {
-        "Phase 1 · RSS":      ("✅", "Active"),
-        "Phase 2 · Classify": ("✅", "Hybrid" if FORCE_HYBRID else "BART"),
-        "Phase 3 · Summarise":("✅", "Gemini" if not FORCE_HYBRID else "Fallback"),
-    }
-    for name, (icon, status) in phases.items():
-        st.markdown(f"{icon} **{name}** — {status}")
+    st.markdown("✅ **Phase 1** · RSS parsed")
+    st.markdown("✅ **Phase 2** · Classified")
+    st.markdown("🔘 **Phase 3** · On-demand per article")
 
     st.markdown("---")
-    st.subheader("Config")
-    st.caption(f"Cache TTL: {CACHE_TTL // 60} min")
-    st.caption(f"Max articles: {MAX_ARTICLES}")
-    st.caption(f"Data: {'Mock feeds' if USE_MOCK else 'Live RSS'}")
+    st.subheader("Session")
+    n_summarised = len(st.session_state.summaries)
+    gemini_n     = sum(
+        1 for v in st.session_state.summaries.values()
+        if v["source"] == "gemini"
+    )
+    st.metric("Summarised", n_summarised)
+    st.metric("via Gemini",  gemini_n)
 
-    if st.button("🔄 Force refresh", use_container_width=True):
+    if n_summarised and st.button("🗑 Clear summaries", use_container_width=True):
+        st.session_state.summaries.clear()
+        st.rerun()
+
+    st.markdown("---")
+    st.caption(f"Cache TTL: {CACHE_TTL // 60} min")
+    st.caption(f"Source: {'Mock' if USE_MOCK else 'Live RSS'}")
+    st.caption(f"Classifier: {'Hybrid' if FORCE_HYBRID else 'BART'}")
+
+    if st.button("🔄 Refresh articles", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
 
-# ─── Main ────────────────────────────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 st.title("Tech News Tracker")
 
-with st.spinner("Running pipeline (Phase 1 → 2 → 3)…"):
+with st.spinner("Fetching and classifying articles…"):
     articles = load_articles()
 
 if not articles:
-    st.error("Pipeline returned no articles. Check your RSS feeds or enable mock mode.")
+    st.error("No articles loaded. Check your RSS feeds or enable mock mode.")
     st.stop()
 
-# Stats row
+# Stats bar
 total    = len(articles)
 avg_conf = sum(a.get("confidence", 0) for a in articles) / total
-gemini_n = sum(1 for a in articles if a.get("summary_source") == "gemini")
 cats     = {a.get("category", "?") for a in articles}
+n_sum    = len(st.session_state.summaries)
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Articles fetched",   total)
-m2.metric("Categories found",   len(cats))
-m3.metric("Avg confidence",     f"{avg_conf:.0%}")
-m4.metric("Gemini summaries",   f"{gemini_n}/{total}")
+m1.metric("Articles",        total)
+m2.metric("Categories",      len(cats))
+m3.metric("Avg confidence",  f"{avg_conf:.0%}")
+m4.metric("Summarised",      f"{n_sum}/{total}")
 
 st.divider()
 
-# Tabs — one per category + All
+# Category tabs
 tab_labels  = CATEGORIES + ["All"]
 tab_objects = st.tabs(tab_labels)
 
@@ -251,5 +306,8 @@ for tab, label in zip(tab_objects, tab_labels):
             continue
 
         st.caption(f"{len(filtered)} article{'s' if len(filtered) != 1 else ''} · newest first")
-        for article in filtered:
-            render_article(article)
+
+        for i, article in enumerate(filtered):
+            # Use a globally unique index so button keys don't collide across tabs
+            global_idx = f"{label}_{i}"
+            render_article(article, global_idx)

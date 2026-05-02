@@ -22,7 +22,6 @@ def run_pipeline(
     use_mock: bool = False,
     force_hybrid_classifier: bool = False,
     max_articles: int = 30,
-    inter_call_sleep: float = 4.0,
 ) -> list[dict]:
     """
     Execute the full T9.3 pipeline.
@@ -32,7 +31,6 @@ def run_pipeline(
     use_mock                : use mock_feeds instead of real RSS (for testing)
     force_hybrid_classifier : skip BART download, use local HybridClassifier
     max_articles            : max articles to fetch and process
-    inter_call_sleep        : seconds between Gemini API calls (rate-limit pacing)
 
     Returns
     -------
@@ -82,7 +80,6 @@ def run_pipeline(
     articles = summarise_articles(
         articles,
         client=client,
-        inter_call_sleep=inter_call_sleep if client else 0.0,
     )
     t3_elapsed = time.perf_counter() - t3
     log.info("Phase 3 done: %d articles summarised in %.2fs", len(articles), t3_elapsed)
@@ -124,10 +121,9 @@ if __name__ == "__main__":
     print("=" * 65)
 
     articles = run_pipeline(
-        use_mock=True,              # flip to False for live RSS
-        force_hybrid_classifier=True,   # flip to False for real BART
+        use_mock=True,
+        force_hybrid_classifier=True,
         max_articles=12,
-        inter_call_sleep=0,         # no sleep in test mode
     )
 
     print()
