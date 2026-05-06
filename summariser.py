@@ -143,26 +143,25 @@ _pacer = _TokenBucketPacer()
 
 SYSTEM_PROMPT = """\
 You are a senior technology journalist. Your job is to read a news article
-and write a clear, informative summary for a busy reader.
+and write a thorough, complete summary for a reader who wants full context.
 
-Write exactly 3 paragraphs. Each paragraph must be 2–3 complete sentences.
+Write as many paragraphs as the article warrants — do not compress or omit
+important details to fit an artificial length limit. Cover:
 
-Paragraph 1 — What happened: Describe the main news event, who is involved,
-and what was announced or released.
-
-Paragraph 2 — Key details: Include the most important specific facts —
-numbers, technical specifications, timelines, or named people/companies
-that give the story substance.
-
-Paragraph 3 — Why it matters: Explain the broader significance, industry
-impact, competitive context, or what happens next.
+- What happened: the main event, who is involved, and what was announced.
+- Key details: specific facts, numbers, technical specifications, timelines,
+  named people or companies that give the story substance.
+- Why it matters: broader significance, industry impact, competitive context,
+  and what happens next.
+- Any additional context, background, or nuance present in the article.
 
 Rules:
 - Write in plain, confident prose. No bullet points, no headers, no markdown.
 - Do not start with phrases like "This article discusses" or "The article says".
 - Preserve specific numbers, names, and technical terms exactly as given.
-- Each paragraph must be separated by a blank line.
-- Do not add any text outside the 3 paragraphs.\
+- Answer in a maximum of 100 words.
+- Separate paragraphs with a blank line.
+- Do not truncate or cut the summary short — include every significant point.\
 """
 
 
@@ -250,13 +249,13 @@ def _call_gemini(client, title: str, body: str, source: str = "") -> Optional[st
                 config=genai_types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
                     temperature=0.2,        # lower → more factual
-                    max_output_tokens=6000,  # ~2 400 chars — room for 3 real paragraphs
+                    max_output_tokens=70000,  # ~3200 chars — room for full substantive summary
                     candidate_count=1,
                 ),
             )
             raw = (response.text or "").strip()
             if raw:
-                log.info("Gemini response (%d chars): %s…", len(raw), raw[:120].replace("\n", " "))
+                log.info("Gemini response (%d chars): %s…", len(raw), raw[:300].replace("\n", " "))
                 return _clean_summary(raw)
             log.warning("Attempt %d: Gemini returned empty response", attempt)
 
@@ -320,8 +319,7 @@ def _clean_summary(raw: str) -> str:
     # Join multi-line paragraphs into single-line blocks
     paragraphs = [" ".join(p.split()) for p in paragraphs]
 
-    # Keep at most 3
-    return "\n\n".join(paragraphs[:3])
+    return "\n\n".join(paragraphs)
 
 
 # ─── Fallback summary (no Gemini) ────────────────────────────────────────────
@@ -329,7 +327,7 @@ def _clean_summary(raw: str) -> str:
 def _fallback_summary(description: str) -> str:
     """
     Build a best-effort summary from the RSS description when Gemini is
-    unavailable. Returns the full description split into up to 3 sentences.
+    unavailable. Returns all sentences from the description.
     """
     if not description:
         return "No summary available — article description is empty."
@@ -342,8 +340,8 @@ def _fallback_summary(description: str) -> str:
     if len(sentences) == 1:
         return sentences[0]
 
-    # Return all sentences (let the UI wrap them into paragraphs)
-    return "\n\n".join(sentences[:3])
+    # Return all sentences (no limit)
+    return "\n\n".join(sentences)
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
@@ -401,6 +399,7 @@ def summarise_article(article: dict, client=None) -> dict:
     # ── Step 2: call Gemini ───────────────────────────────────────────────
     if client is not None and body:
         summary = _call_gemini(client, title, body, source)
+        print (summary)
         if summary:
             article["summary"]        = summary
             article["summary_source"] = "gemini"
