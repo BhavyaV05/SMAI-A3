@@ -67,6 +67,7 @@ def run_pipeline(
     articles = classify_articles(
         articles,
         force_hybrid=force_hybrid_classifier,
+        use_finetuned=True # make flase if we donr wanna use finetuned 
     )
     t2_elapsed = time.perf_counter() - t2
     log.info("Phase 2 done: %d articles classified in %.2fs", len(articles), t2_elapsed)

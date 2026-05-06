@@ -1,19 +1,23 @@
 """
-classifier_finetuned.py — Drop-in replacement for classifier.py using finetuned BART
-=====================================================================================
-This is an updated version of classifier.py that can use either:
-  1. The original facebook/bart-large-mnli (zero-shot, general purpose)
-  2. A finetuned model (trained on India headlines dataset)
+classifier.py — Phase 2: Zero-Shot Article Classification
+==========================================================
+Classifies articles into one of five categories using zero-shot NLI.
 
-To switch to the finetuned model, set USE_FINETUNED = True
+PRIMARY:  facebook/bart-large-mnli  (HuggingFace transformers pipeline)
+          — requires internet access to download model on first run (~1.6 GB)
+          — auto-cached to ~/.cache/huggingface after first download
 
-Instructions
-------------
-1. First, run: python finetune_bart.py
-2. Then, replace classifier.py with this file OR update classifier.py directly
-3. In get_classifier(), pass use_finetuned=True to use your custom model
+FALLBACK: HybridClassifier
+          — keyword lexicon + TF-IDF cosine similarity + softmax
+          — identical public interface to the BART pipeline
+          — zero downloads, runs in milliseconds, 90%+ accuracy on tech news
+          — activates automatically when HuggingFace is unreachable
 
-Or just patch the _try_load_bart() function in your existing classifier.py.
+Design principle: both backends produce the exact same dict shape so the
+rest of the pipeline never needs to know which one ran.
+
+Run standalone (smoke-test):
+    python classifier.py
 """
 
 import logging
@@ -37,17 +41,17 @@ CANDIDATE_LABELS: list[str] = [
     "Entertainment",
 ]
 
-INPUT_CHARS = 200
-
-# ────────────────────────────────────────────────────────────────────────────
-# FINETUNED MODEL CONFIGURATION
-# ────────────────────────────────────────────────────────────────────────────
-FINETUNED_MODEL_PATH = "./bart-finetuned-india-headlines"
-USE_FINETUNED = False  # Set to True to use the finetuned model by default
+# Input text built from: article title + description[:200]
+# This mirrors BART-MNLI's NLI premise — it checks whether the text
+# "entails" each label hypothesis, e.g. "This text is about Technology"
+INPUT_CHARS = 200   # chars of description to append to the title
 
 
 # ─── Hybrid fallback classifier ───────────────────────────────────────────────
 
+# Rich keyword lexicons per category.
+# Multi-word keywords score proportionally to their word count
+# (a 2-word match is stronger evidence than two 1-word matches).
 _KEYWORD_LEXICON: dict[str, list[str]] = {
     "Technology": [
         "ai", "artificial intelligence", "machine learning", "deep learning",
@@ -142,6 +146,7 @@ _KEYWORD_LEXICON: dict[str, list[str]] = {
     ],
 }
 
+# Pre-join lexicon into a document for TF-IDF comparison
 _LABEL_DOCS: dict[str, str] = {
     label: " ".join(keywords)
     for label, keywords in _KEYWORD_LEXICON.items()
@@ -149,49 +154,74 @@ _LABEL_DOCS: dict[str, str] = {
 
 
 class HybridClassifier:
-    """Keyword + TF-IDF cosine hybrid classifier (identical to original)."""
+    """
+    Keyword + TF-IDF cosine hybrid classifier.
+
+    Replicates the public interface of a HuggingFace zero-shot pipeline:
+        result = classifier(text, candidate_labels=[...])
+        result["labels"][0]  → top category
+        result["scores"][0]  → confidence (0-1)
+
+    Algorithm
+    ---------
+    1. Keyword hit score: for each candidate label, count how many of its
+       keywords appear in the text, weighting multi-word phrases higher.
+       (Inspired by BART-MNLI's "does text entail label?" intuition.)
+
+    2. TF-IDF cosine similarity: vectorise the text alongside each label's
+       keyword document, compute cosine similarity.
+
+    3. Weighted combination: 60% keyword hits + 40% TF-IDF cosine.
+
+    4. Softmax with temperature=0.2 → calibrated probability scores.
+    """
 
     def __call__(
         self,
         text: str,
         candidate_labels: Optional[list[str]] = None,
-        **kwargs,
+        **kwargs,           # absorbs pipeline kwargs like multi_label
     ) -> dict:
         if candidate_labels is None:
             candidate_labels = CANDIDATE_LABELS
 
         text_lower = text.lower()
 
+        # ── 1. Keyword hit scores ─────────────────────────────────────────
         kw_scores: dict[str, float] = {}
         for label in candidate_labels:
             hits = 0.0
             for kw in _KEYWORD_LEXICON.get(label, []):
                 if kw in text_lower:
-                    hits += len(kw.split())
+                    hits += len(kw.split())   # multi-word bonus
             kw_scores[label] = hits
 
         kw_arr = np.array([kw_scores[l] for l in candidate_labels], dtype=float)
         kw_max = kw_arr.max()
         kw_norm = kw_arr / kw_max if kw_max > 0 else np.ones(len(candidate_labels)) / len(candidate_labels)
 
+        # ── 2. TF-IDF cosine similarity ───────────────────────────────────
         label_docs = [_LABEL_DOCS.get(l, l) for l in candidate_labels]
         try:
             vec = TfidfVectorizer(
                 stop_words="english",
-                ngram_range=(1, 2),
-                sublinear_tf=True,
+                ngram_range=(1, 2),      # captures bigrams like "machine learning"
+                sublinear_tf=True,       # log-normalised TF
             ).fit_transform([text] + label_docs)
             tfidf_sims = cosine_similarity(vec[0:1], vec[1:]).flatten()
         except Exception as exc:
             log.debug("TF-IDF failed: %s — using keyword scores only", exc)
             tfidf_sims = np.zeros(len(candidate_labels))
 
+        # ── 3. Weighted combination ───────────────────────────────────────
         combined = 0.6 * kw_norm + 0.4 * tfidf_sims
 
-        T = 0.2
+        # ── 4. Temperature-scaled softmax ─────────────────────────────────
+        T = 0.2   # lower T → sharper distribution (more decisive)
         exp_c = np.exp(combined / T - (combined / T).max())
         scores = (exp_c / exp_c.sum()).tolist()
 
+        # Rank highest-first (same as pipeline output)
         ranked = sorted(
             zip(candidate_labels, scores),
             key=lambda x: x[1],
@@ -206,31 +236,18 @@ class HybridClassifier:
 
 # ─── Backend loader ───────────────────────────────────────────────────────────
 
-def _try_load_bart(model_path: Optional[str] = None) -> object:
+def _try_load_bart() -> object:
     """
-    Attempt to load BART model.
-    
-    Parameters
-    ----------
-    model_path : str, optional
-        Path to a finetuned BART model. If None, uses the base
-        facebook/bart-large-mnli from HuggingFace Hub.
-    
-    Returns
-    -------
-    The pipeline on success, None on failure.
+    Attempt to load facebook/bart-large-mnli.
+    Returns the pipeline on success, None on failure.
+    The pipeline is None-safe: callers check before using.
     """
     try:
         from transformers import pipeline
-
-        if model_path:
-            log.info("Loading finetuned BART from: %s", model_path)
-        else:
-            log.info("Loading facebook/bart-large-mnli — first run downloads ~1.6 GB…")
-
+        log.info("Loading facebook/bart-large-mnli — first run downloads ~1.6 GB…")
         clf = pipeline(
             "zero-shot-classification",
-            model=model_path or "facebook/bart-large-mnli",
+            model="facebook/bart-large-mnli",
             device=-1,   # CPU; change to 0 for first GPU
         )
         log.info("BART pipeline loaded successfully")
@@ -240,23 +257,20 @@ def _try_load_bart(model_path: Optional[str] = None) -> object:
         return None
 
 
+# Module-level singleton — loaded once per process
+# Streamlit should wrap get_classifier() in @st.cache_resource
 _classifier_singleton: object = None
 
 
-def get_classifier(
-    force_hybrid: bool = False,
-    use_finetuned: bool = False,
-) -> object:
+def get_classifier(force_hybrid: bool = False) -> object:
     """
-    Return the classifier singleton.
+    Return the classifier singleton (BART pipeline or HybridClassifier).
 
     Parameters
     ----------
     force_hybrid : bool
         Skip BART and use HybridClassifier directly.
-    use_finetuned : bool
-        Load the finetuned BART model instead of the base model.
-        Requires finetune_bart.py to have been run successfully.
+        Set True when HuggingFace is known to be unreachable.
 
     Returns
     -------
@@ -271,45 +285,47 @@ def get_classifier(
         log.info("Using HybridClassifier (forced)")
         _classifier_singleton = HybridClassifier()
     else:
-        # Try to load BART (finetuned or base)
-        model_path = None
-        if use_finetuned:
-            if os.path.exists(FINETUNED_MODEL_PATH):
-                model_path = FINETUNED_MODEL_PATH
-            else:
-                log.warning(
-                    "Finetuned model not found at %s — using base model",
-                    FINETUNED_MODEL_PATH,
-                )
-
-        bart = _try_load_bart(model_path)
+        bart = _try_load_bart()
         _classifier_singleton = bart if bart is not None else HybridClassifier()
 
     backend_name = type(_classifier_singleton).__name__
     if backend_name == "ZeroShotClassificationPipeline":
-        if use_finetuned:
-            backend_name = "BART (finetuned on India headlines)"
-        else:
-            backend_name = "BART (facebook/bart-large-mnli)"
-
+        backend_name = "BART (facebook/bart-large-mnli)"
     log.info("Active classifier backend: %s", backend_name)
     return _classifier_singleton
 
 
-# ─── Core functions (identical to original) ───────────────────────────────────
+# ─── Core function ────────────────────────────────────────────────────────────
 
 def classify_article(
     article: dict,
     classifier=None,
     candidate_labels: Optional[list[str]] = None,
 ) -> dict:
-    """Run zero-shot classification on a single article dict."""
+    """
+    Run zero-shot classification on a single article dict.
+
+    Modifies the article in-place AND returns it (functional style also works).
+
+    Parameters
+    ----------
+    article         : article dict from rss_parser / mock_feeds
+    classifier      : optional pre-loaded classifier (avoids re-loading)
+    candidate_labels: override the default CANDIDATE_LABELS
+
+    Adds to article
+    ---------------
+    category   : str   — top predicted label
+    confidence : float — probability score 0-1
+    all_scores : dict  — {label: score} for all labels
+    """
     if classifier is None:
         classifier = get_classifier()
 
     if candidate_labels is None:
         candidate_labels = CANDIDATE_LABELS
 
+    # Build classification input: title + first N chars of description
     title = article.get("title", "")
     desc  = article.get("description", "")
     text  = f"{title}. {desc[:INPUT_CHARS]}".strip()
@@ -332,23 +348,21 @@ def classify_articles(
     articles: list[dict],
     candidate_labels: Optional[list[str]] = None,
     force_hybrid: bool = False,
-    use_finetuned: bool = False,
 ) -> list[dict]:
     """
     Classify all articles in the list.
-    
+
     Parameters
     ----------
     articles        : list of article dicts (Phase 1 output)
     candidate_labels: override default CANDIDATE_LABELS
     force_hybrid    : bypass BART, use HybridClassifier
-    use_finetuned   : use finetuned BART instead of base model
 
     Returns
     -------
     Same list with 'category', 'confidence', 'all_scores' filled in.
     """
-    clf = get_classifier(force_hybrid=force_hybrid, use_finetuned=use_finetuned)
+    clf = get_classifier(force_hybrid=force_hybrid)
     total = len(articles)
 
     log.info("Phase 2: classifying %d articles…", total)
@@ -370,3 +384,54 @@ def classify_articles(
         total, elapsed, elapsed / total * 1000 if total else 0,
     )
     return articles
+
+
+# ─── CLI smoke-test ───────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        level=logging.INFO,
+        datefmt="%H:%M:%S",
+    )
+
+    print("=" * 65)
+    print("T9.3 — Phase 2: Zero-Shot Classifier smoke-test")
+    print("=" * 65)
+
+    TEST_CASES = [
+        # (text, expected_label)
+        ("Apple M4 Ultra chip sets benchmark records in Xcode and Final Cut Pro", "Technology"),
+        ("OpenAI GPT-5 brings real-time voice and vision to ChatGPT multimodal AI", "Technology"),
+        ("Google Gemini 2.0 Flash human-level coding SWE-Bench 72.3% score", "Technology"),
+        ("Meta releases open-source Llama 4 with 405 billion parameters", "Technology"),
+        ("Figma Make Design AI generates production-ready component libraries", "Technology"),
+        ("Tesla FSD v13 passes 10 million mile autonomous driving mark zero accidents", "Technology"),
+        ("NVIDIA H200 GPU supply constraints ease as TSMC Arizona Japan fabs ramp up", "Technology"),
+        ("India startup ecosystem crosses 200 billion valuation fintech SaaS Bengaluru", "Business"),
+        ("Razorpay acquires Malaysian fintech Curlec for 800 crore international deal", "Business"),
+        ("Zepto raises 400 million Series G at 5 billion valuation dark stores expansion", "Business"),
+        ("Ola Electric files DRHP with SEBI IPO listing 10000 crore Q3 2026", "Business"),
+        ("Microsoft Copilot embedded Windows 12 kernel file system clipboard app APIs", "Technology"),
+        ("India general election BJP Congress party vote results parliament seats", "Politics"),
+        ("India cricket team wins test match series batsman bowler wicket score runs", "Sports"),
+        ("Bollywood actor film box office release trailer Netflix streaming award", "Entertainment"),
+    ]
+
+    clf = get_classifier(force_hybrid=True)   # force local for smoke-test
+    correct = 0
+
+    for text, expected in TEST_CASES:
+        article = {"title": text, "description": ""}
+        classify_article(article, classifier=clf)
+        pred = article["category"]
+        conf = article["confidence"]
+        ok = "✓" if pred == expected else "✗"
+        if pred == expected:
+            correct += 1
+        print(f"  {ok} [{conf:.0%}] {pred:<15} ← {text[:55]}")
+
+    print()
+    accuracy = correct / len(TEST_CASES)
+    print(f"  Accuracy: {correct}/{len(TEST_CASES)} = {accuracy:.0%}")
+    print("=" * 65)
