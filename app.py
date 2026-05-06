@@ -18,7 +18,7 @@ import streamlit as st
 
 # ─── Runtime switches ─────────────────────────────────────────────────────────
 USE_MOCK     = False  # True → mock_feeds (offline) | False → live RSS
-FORCE_HYBRID = True   # True → local classifier     | False → BART download
+FORCE_HYBRID = False   # True → local classifier     | False → BART download
 MAX_ARTICLES = 30
 CACHE_TTL    = 1800   # seconds (30 min)
 

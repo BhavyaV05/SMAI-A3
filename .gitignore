@@ -1,1 +1,4 @@
 .env
+bart-finetuned-india-headlines/
+hf_cache/
+__pycache__

@@ -43,7 +43,7 @@ INPUT_CHARS = 200
 # FINETUNED MODEL CONFIGURATION
 # ────────────────────────────────────────────────────────────────────────────
 FINETUNED_MODEL_PATH = "./bart-finetuned-india-headlines"
-USE_FINETUNED = False  # Set to True to use the finetuned model by default
+USE_FINETUNED = True  # Set to True to use the finetuned model by default
 
 
 # ─── Hybrid fallback classifier ───────────────────────────────────────────────

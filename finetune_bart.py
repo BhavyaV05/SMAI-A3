@@ -38,16 +38,16 @@ from transformers import (
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-CSV_PATH        = "./india-news-headlines.csv"
+CSV_PATH        = "./st.csv"
 BASE_MODEL      = "facebook/bart-large-mnli"
 OUTPUT_DIR      = "./bart-finetuned-india-headlines"
 CACHE_DIR       = "./hf_cache"
 
-MAX_HEADLINES   = 5000   # tech headlines to use (keep training time reasonable)
+MAX_HEADLINES   = 2000   # tech headlines to use (keep training time reasonable)
 MAX_SEQ_LENGTH  = 128    # shorter than 512 speeds things up significantly
-BATCH_SIZE      = 8
-NUM_EPOCHS      = 3
-LEARNING_RATE   = 5e-5
+BATCH_SIZE      = 16
+NUM_EPOCHS      = 1
+LEARNING_RATE   = 5e-4
 
 # All five categories the classifier uses
 CATEGORIES = ["Technology", "Business", "Politics", "Sports", "Entertainment"]
@@ -233,7 +233,7 @@ def train(ds: DatasetDict, tokenizer, model, device: str):
 
     args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-        overwrite_output_dir=True,
+        # overwrite_output_dir=True,
         num_train_epochs=NUM_EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
