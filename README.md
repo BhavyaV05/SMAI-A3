@@ -15,32 +15,6 @@ Repository: https://github.com/BhavyaV05/SMAI-A3
 
 ---
 
-## Files you need to know (what each does)
-
-- app.py
-  - Streamlit UI. Provides filters, displays article cards, and shows summaries. Adjustable switches at top (USE_MOCK, FORCE_HYBRID, MAX_ARTICLES).
-
-- pipeline_runner.py
-  - Runs the full pipeline: Phase 1 → Phase 2 → Phase 3. Useful for CLI testing and debugging (can run in mock mode).
-
-- rss_parser.py
-  - Phase 1: fetches configured RSS feeds, cleans HTML, deduplicates articles by URL, and returns a list of normalized article dicts.
-
-- classifier.py
-  - Phase 2: assigns categories to each article. By default it attempts to use Hugging Face BART zero-shot pipeline. If BART is unavailable it falls back to a fast keyword + TF-IDF hybrid classifier.
-
-- finetune_bart.py
-  - Optional: downloads an India headlines dataset and finetunes a local BART model to improve classification accuracy for Indian news.
-
-- summariser.py
-  - Phase 3: attempts to fetch the full article body with `trafilatura`, then calls Google Gemini (if GEMINI_API_KEY is set) to create a readable summary. Uses rate limiting and retries. Falls back to a short summary made from RSS description if LLM is unavailable.
-
-- mock_feeds.py
-  - Offline sample articles for development and tests without network calls.
-
-- requirements.txt
-  - Python packages to install.
-
 ---
 
 ## How to use (step-by-step)
@@ -105,14 +79,6 @@ This prints timings, category breakdowns, and sample summaries.
 
 ---
 
-## Environment variables and config
-
-- GEMINI_API_KEY — (optional) Google Gemini API key for high-quality LLM summaries.
-- Edit top of `app.py` to change runtime options:
-  - `USE_MOCK` (True/False) — use offline sample feeds
-  - `FORCE_HYBRID` (True/False) — skip BART and use keyword+TF-IDF
-  - `MAX_ARTICLES` (integer) — how many articles to process
-
 ---
 
 ## Troubleshooting (quick)
@@ -122,12 +88,6 @@ This prints timings, category breakdowns, and sample summaries.
 - If `trafilatura` fails to fetch article content (paywall or 403): summariser falls back to the RSS description.
 
 ---
-
-## Next steps (optional improvements)
-
-- Add a Dockerfile for containerized deployment.
-- Add a small Redis cache for summaries to reduce LLM calls.
-- Add unit tests for rss parsing and classifier fallback.
 
 ---
 
