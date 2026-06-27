@@ -1,163 +1,134 @@
 # SMAI-A3 — Tech News Tracker
 
-An end-to-end NLP pipeline that fetches tech news from RSS feeds, classifies articles, and generates rich summaries using LLMs. Built for learning, demos, and lightweight production use.
+A simple, practical pipeline that fetches tech news, classifies each article into a category, and generates readable summaries. This README now focuses on how to use the project and explains what each component does and how they connect.
 
 Repository: https://github.com/BhavyaV05/SMAI-A3
 
 ---
 
-## What this project does
+## What this project does (plain English)
 
-1. Phase 1 — RSS Parsing: fetches and normalises articles from configured RSS/Atom feeds (TechCrunch, The Verge, YourStory).
-2. Phase 2 — Classification: assigns each article to one of five categories (Technology, Business, Politics, Sports, Entertainment) using zero-shot BART; falls back to a keyword+TF-IDF hybrid classifier and supports an optional finetuned BART.
-3. Phase 3 — Summarisation: fetches full article text via `trafilatura` and generates a substantive multi-paragraph summary using Google Gemini (via google-generativeai SDK). Rate-limited and retried.
-4. UI — Streamlit dashboard (app.py) to browse, filter and view classified articles and summaries.
-
----
-
-## Repository layout
-
-- app.py                  — Streamlit application (UI)
-- pipeline_runner.py      — Orchestrates Phase 1 → 2 → 3 end-to-end
-- rss_parser.py           — Phase 1: feed fetching and normalization
-- classifier.py           — Phase 2: zero-shot + hybrid fallback classification
-- finetune_bart.py        — Optional: finetune facebook/bart-large-mnli on India headlines
-- summariser.py           — Phase 3: fetch article body and call Gemini
-- mock_feeds.py           — Offline test data for development
-- requirements.txt        — Python dependencies
-- FINETUNE_GUIDE.md       — Detailed finetuning instructions
+1. Reads RSS feeds (TechCrunch, The Verge, YourStory) and extracts headlines, short descriptions and links.
+2. Decides which category each article belongs to (Technology, Business, Politics, Sports, Entertainment).
+3. Fetches the full article (when possible) and produces a human-style summary.
+4. Shows everything in a Streamlit web UI where you can filter and read summaries.
 
 ---
 
-## Quick start
+## Files you need to know (what each does)
 
-1. Clone the repo:
+- app.py
+  - Streamlit UI. Provides filters, displays article cards, and shows summaries. Adjustable switches at top (USE_MOCK, FORCE_HYBRID, MAX_ARTICLES).
+
+- pipeline_runner.py
+  - Runs the full pipeline: Phase 1 → Phase 2 → Phase 3. Useful for CLI testing and debugging (can run in mock mode).
+
+- rss_parser.py
+  - Phase 1: fetches configured RSS feeds, cleans HTML, deduplicates articles by URL, and returns a list of normalized article dicts.
+
+- classifier.py
+  - Phase 2: assigns categories to each article. By default it attempts to use Hugging Face BART zero-shot pipeline. If BART is unavailable it falls back to a fast keyword + TF-IDF hybrid classifier.
+
+- finetune_bart.py
+  - Optional: downloads an India headlines dataset and finetunes a local BART model to improve classification accuracy for Indian news.
+
+- summariser.py
+  - Phase 3: attempts to fetch the full article body with `trafilatura`, then calls Google Gemini (if GEMINI_API_KEY is set) to create a readable summary. Uses rate limiting and retries. Falls back to a short summary made from RSS description if LLM is unavailable.
+
+- mock_feeds.py
+  - Offline sample articles for development and tests without network calls.
+
+- requirements.txt
+  - Python packages to install.
+
+---
+
+## How to use (step-by-step)
+
+1. Clone and install dependencies:
 
 ```bash
 git clone https://github.com/BhavyaV05/SMAI-A3.git
 cd SMAI-A3
-```
-
-2. Create a virtual environment and install dependencies:
-
-```bash
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-3. (Optional) Add an API key for Google Gemini in `.env`:
+2. Optional: Add Gemini API key for better summaries
+
+Create a `.env` file in the repo root with:
 
 ```
 GEMINI_API_KEY=your_key_here
 ```
 
-4. Run the Streamlit UI:
+If you do not set GEMINI_API_KEY, the summariser will still work but will use a fallback that constructs summaries from RSS descriptions.
+
+3. Quick run (single-machine)
+
+- Start the Streamlit UI (recommended):
 
 ```bash
 streamlit run app.py
 ```
 
-Open http://localhost:8501 in your browser.
+Open http://localhost:8501. Use the sidebar to select categories, toggle mock/live feeds, and adjust article count.
 
----
-
-## Running the pipeline CLI
-
-- Run the full pipeline (mock mode):
+- Run the full pipeline from the command line (no UI):
 
 ```bash
 python pipeline_runner.py
 ```
 
-- Test RSS parsing only:
+This prints timings, category breakdowns, and sample summaries.
 
-```bash
-python rss_parser.py
-```
+4. Development tips
 
-- Test summariser (needs GEMINI_API_KEY or will use fallback):
-
-```bash
-python summariser.py
-```
-
-- Run finetuning (requires extra packages and GPU for reasonable speed):
-
-```bash
-python finetune_bart.py
-```
-
-See `FINETUNE_GUIDE.md` for details.
+- To avoid large downloads or slow model loading, set `FORCE_HYBRID=True` in `app.py` to use the fast local fallback classifier.
+- For offline testing set `USE_MOCK=True` in `app.py` or run `pipeline_runner.py` with the mock option (it uses `mock_feeds.py`).
+- To train a local finetuned classifier, follow `FINETUNE_GUIDE.md` and run `python finetune_bart.py` (GPU recommended).
 
 ---
 
-## How it works — short technical summary
+## What you will see (expected behavior & outputs)
 
-Phase 1 (rss_parser.py):
-- Uses `feedparser` to read feeds, cleans HTML, extracts `title`, `description`, `url`, `published`.
-- Deduplicates by URL and sorts newest-first.
+- pipeline_runner.py output:
+  - Phase timings, number of articles fetched, category counts, and whether summaries were produced by Gemini or by fallback.
 
-Phase 2 (classifier.py):
-- Primary: Hugging Face `pipeline("zero-shot-classification", model="facebook/bart-large-mnli")` to get entailment-based label scores.
-- Fallback: `HybridClassifier` combining keyword counts and TF-IDF cosine similarity (60% keyword, 40% TF-IDF), with softmax temperature sharpening.
-- Optional: Finetuned BART trained on India headlines dataset (see finetune_bart.py / FINETUNE_GUIDE.md) for better local-domain accuracy.
+- app.py UI:
+  - Grid of article cards. Each card shows title, source, category, confidence, and a short summary.
+  - Click a card to view the full summary and link to original article.
 
-Phase 3 (summariser.py):
-- Fetches article body with `trafilatura` (preferred) or falls back to RSS description.
-- Sends prompt + article body to Google Gemini via `google-generativeai` client.
-- Enforces rate limits with a token-bucket pacer and retries with exponential backoff on 429s.
-- Post-processes Gemini output (strip markdown, normalize paragraphs).
+- Files created optionally:
+  - `./bart-finetuned-india-headlines/` when you run finetuning.
 
 ---
 
-## Configuration & options
+## Environment variables and config
 
-Edit runtime switches in `app.py` or pass flags in `pipeline_runner.py`:
-
-- `USE_MOCK` (app.py) — use mock_feeds instead of live RSS.
-- `FORCE_HYBRID` — force keyword+TF-IDF fallback (no BART download).
-- `MAX_ARTICLES` — cap total articles processed.
-- `GEMINI_API_KEY` — set in environment or `.env` for summaries.
-
-Finetuned model path used by classifier: `./bart-finetuned-india-headlines` (created by finetune_bart.py when run).
+- GEMINI_API_KEY — (optional) Google Gemini API key for high-quality LLM summaries.
+- Edit top of `app.py` to change runtime options:
+  - `USE_MOCK` (True/False) — use offline sample feeds
+  - `FORCE_HYBRID` (True/False) — skip BART and use keyword+TF-IDF
+  - `MAX_ARTICLES` (integer) — how many articles to process
 
 ---
 
-## ML concepts used (for interviews)
+## Troubleshooting (quick)
 
-- Zero-shot learning using NLI (BART + MNLI): classify without labeled training data by testing entailment for each label.
-- Transfer learning and finetuning: adapt pre-trained BART to India headlines for domain performance gains.
-- TF-IDF + cosine similarity: classic IR technique used in the hybrid fallback.
-- Prompt engineering and LLM generation: tailored system prompt for journalist-style summaries.
-- Rate limiting & exponential backoff: production-friendly API usage patterns.
-
-Concepts intentionally not used but relevant: supervised end-to-end classifier (requires labeled dataset), dense embeddings + vector DB for semantic search, active learning loops.
+- If the app is slow or BART fails to load: set `FORCE_HYBRID=True` in `app.py`.
+- If summaries are missing or you get rate-limited: ensure `GEMINI_API_KEY` is set and valid; summariser has built-in rate pacing and retries.
+- If `trafilatura` fails to fetch article content (paywall or 403): summariser falls back to the RSS description.
 
 ---
 
-## Production considerations
+## Next steps (optional improvements)
 
-- Secrets: keep `GEMINI_API_KEY` out of source control (.env is ignored).
-- Caching: Streamlit caching used for UI; consider Redis for scale.
-- Rate limiting: summariser enforces a minimum gap between requests; adjust for paid tiers.
-- Monitoring & logs: modules log progress and warnings; integrate with a logging/observability stack for production.
-
----
-
-## Troubleshooting & tips
-
-- If BART fails to load or memory is low: set `FORCE_HYBRID=True` to use hybrid classifier.
-- If Gemini returns empty or rate-limited: check `GEMINI_API_KEY`, inspect logs, or let summariser use fallback.
-- If finetuning fails due to OOM on GPU: reduce `BATCH_SIZE` in `finetune_bart.py` or train on CPU (much slower).
+- Add a Dockerfile for containerized deployment.
+- Add a small Redis cache for summaries to reduce LLM calls.
+- Add unit tests for rss parsing and classifier fallback.
 
 ---
 
-## License & attribution
-
-This project contains third-party models and libraries (Hugging Face, Google Gemini, trafilatura). Respect their licenses and API terms.
-
----
-
-If you want, I can also add a minimal CONTRIBUTING.md, CI workflow, or a Dockerfile to run this as a containerized service.
-
+If you'd like, I can update the README in-place in the repository now (add this content to README.md). Would you like me to push this change?"}]}]
